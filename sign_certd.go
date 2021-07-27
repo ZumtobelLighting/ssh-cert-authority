@@ -8,18 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/ec2metadata"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/kms"
-	"github.com/cloudtools/ssh-cert-authority/client"
-	"github.com/cloudtools/ssh-cert-authority/util"
-	"github.com/cloudtools/ssh-cert-authority/version"
-	"github.com/codegangsta/cli"
-	"github.com/gorilla/handlers"
-	"github.com/gorilla/mux"
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
 	"io"
 	"io/ioutil"
 	"log"
@@ -32,6 +20,19 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/ec2metadata"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/kms"
+	ssh_ca_client "github.com/cloudtools/ssh-cert-authority/client"
+	ssh_ca_util "github.com/cloudtools/ssh-cert-authority/util"
+	"github.com/cloudtools/ssh-cert-authority/version"
+	"github.com/codegangsta/cli"
+	"github.com/gorilla/handlers"
+	"github.com/gorilla/mux"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 // Yanked from PROTOCOL.certkeys
@@ -278,7 +279,10 @@ func (h *certRequestHandler) createSigningRequest(rw http.ResponseWriter, req *h
 		req.RemoteAddr, cert.ValidPrincipals, cert.ValidAfter, cert.ValidBefore, reason)
 
 	if config.SlackUrl != "" {
-		slackMsg := fmt.Sprintf("SSH cert request from %s with id %s for %s", config.AuthorizedUsers[requesterFp], requestIDStr, reason)
+		validUntil := time.Unix(int64(cert.ValidBefore), 0).Local()
+		slackMsg := fmt.Sprintf("SSH cert request from %s with id %s & principals %v valid until %s for %s",
+			config.AuthorizedUsers[requesterFp], requestIDStr, cert.ValidPrincipals,
+			validUntil.Format(time.UnixDate), reason)
 		err = ssh_ca_client.PostToSlack(config.SlackUrl, config.SlackChannel, slackMsg)
 		if err != nil {
 			log.Printf("Unable to post to slack: %v", err)
@@ -287,13 +291,23 @@ func (h *certRequestHandler) createSigningRequest(rw http.ResponseWriter, req *h
 
 	var returnStatus int
 	if signed {
-		slackMsg := fmt.Sprintf("SSH cert request %s auto signed.", requestIDStr)
-		err := ssh_ca_client.PostToSlack(config.SlackUrl, config.SlackChannel, slackMsg)
-		if err != nil {
-			log.Printf("Unable to post to slack for %s: %v", requestIDStr, err)
+		if config.SlackUrl != "" {
+			slackMsg := fmt.Sprintf("SSH cert request %s auto signed.", requestIDStr)
+			err := ssh_ca_client.PostToSlack(config.SlackUrl, config.SlackChannel, slackMsg)
+			if err != nil {
+				log.Printf("Unable to post to slack for %s: %v", requestIDStr, err)
+			}
 		}
 		returnStatus = http.StatusAccepted
 	} else {
+		if config.SlackUrl != "" {
+			slackMsg := fmt.Sprintf("Sign this cert with `ssh-cert-authority sign -e %s %s`",
+				environment, requestIDStr)
+			err := ssh_ca_client.PostToSlack(config.SlackUrl, config.SlackChannel, slackMsg)
+			if err != nil {
+				log.Printf("Unable to post to slack for %s: %v", requestIDStr, err)
+			}
+		}
 		returnStatus = http.StatusCreated
 	}
 	rw.WriteHeader(returnStatus)
